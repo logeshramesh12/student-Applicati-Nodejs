@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.1038.0",
+    "react-icons": "^5.5.0"
+  }
+}
