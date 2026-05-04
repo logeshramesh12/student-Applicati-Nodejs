@@ -1,6 +1,7 @@
 const express = require('express');
 const mysql = require('mysql2/promise');
 const cors = require('cors');
+const jwt = require("jsonwebtoken");
 
 const {
   SecretsManagerClient,
@@ -11,6 +12,7 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+const SECRET = "mysecretkey";
 let db;
 
 /* ------------------ AWS CONFIG ------------------ */
@@ -20,10 +22,10 @@ const secretsClient = new SecretsManagerClient({
   region: REGION
 });
 
-/* ------------------ FETCH DB CONFIG FROM SECRETS MANAGER ------------------ */
+/* ------------------ FETCH DB CONFIG ------------------ */
 async function getDBConfig() {
   const command = new GetSecretValueCommand({
-    SecretId: "myapp/db/config" 
+    SecretId: "myapp/db/config"
   });
 
   const response = await secretsClient.send(command);
@@ -32,167 +34,141 @@ async function getDBConfig() {
     throw new Error("Secret is empty");
   }
 
-  const secret = JSON.parse(response.SecretString);
-
-  if (!secret.host || !secret.user || !secret.password || !secret.database) {
-    throw new Error("Missing DB config in secret");
-  }
-
-  return secret;
+  return JSON.parse(response.SecretString);
 }
 
-/* ------------------ CREATE DATABASE IF NOT EXISTS ------------------ */
-async function ensureDatabaseExists(config) {
-  const conn = await mysql.createConnection({
-    host: config.host,
-    user: config.user,
-    password: config.password
+/* ------------------ CONNECT DB ------------------ */
+const connectDB = async () => {
+  const cfg = await getDBConfig();
+
+  const pool = await mysql.createPool({
+    host: cfg.host,
+    user: cfg.user,
+    password: cfg.password,
+    database: cfg.database,
+    connectionLimit: 10,
+    ssl: { rejectUnauthorized: false }
   });
 
-  await conn.query(`CREATE DATABASE IF NOT EXISTS \`${config.database}\``);
-  await conn.end();
-
-  console.log("✅ Database verified");
-}
-
-/* ------------------ CONNECT WITH RETRY ------------------ */
-const connectWithRetry = async (retries = 10, delay = 3000) => {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const cfg = await getDBConfig();
-
-      await ensureDatabaseExists(cfg);
-
-      const pool = await mysql.createPool({
-        host: cfg.host,
-        user: cfg.user,
-        password: cfg.password,
-        database: cfg.database,
-        connectionLimit: 10,
-        ssl: { rejectUnauthorized: false }
-      });
-
-      console.log(`✅ Connected to MySQL (Attempt ${attempt})`);
-      return pool;
-
-    } catch (error) {
-      console.error(`❌ MySQL connection failed (Attempt ${attempt}/${retries}):`, error.message);
-
-      if (attempt === retries) throw error;
-
-      console.log(`Retrying in ${delay / 1000}s...`);
-      await new Promise(res => setTimeout(res, delay));
-    }
-  }
+  console.log("✅ Connected to MySQL");
+  return pool;
 };
 
-/* ------------------ ENSURE TABLES ------------------ */
+/* ------------------ CREATE TABLES ------------------ */
 const ensureTables = async (db) => {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS students (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255),
+    email VARCHAR(255),
+    phone VARCHAR(20),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS students (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(255),
+      roll_number VARCHAR(255),
+      class VARCHAR(255),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  console.log("✅ Tables ready");
+};
+
+/* ------------------ TOKEN MIDDLEWARE ------------------ */
+const verifyToken = (req, res, next) => {
+  const token = req.headers.authorization;
+
+  if (!token) {
+    return res.status(403).json({ message: "No token" });
+  }
+
   try {
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS student (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        name VARCHAR(255),
-        roll_number VARCHAR(255),
-        class VARCHAR(255),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS teacher (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        name VARCHAR(255),
-        subject VARCHAR(255),
-        class VARCHAR(255),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    console.log("✅ Tables ensured successfully");
-  } catch (error) {
-    console.error("❌ Error ensuring tables:", error);
-    throw error;
+    const decoded = jwt.verify(token, SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    return res.status(401).json({ message: "Invalid token" });
   }
 };
 
 /* ------------------ START APP ------------------ */
 (async () => {
   try {
-    db = await connectWithRetry();
-    // 🔥 TEST SECRET HERE (temporary)
-    const config = await getDBConfig();
-    console.log("🔐 DB CONFIG FROM SECRETS:", config);
-
-    db = await connectWithRetry();
+    db = await connectDB();
     await ensureTables(db);
 
-    // ---- ROUTES ----
-    app.get('/', async (req, res) => {
-      const [data] = await db.query("SELECT * FROM student");
-      res.json({ message: "Backend running 🚀", data });
+    /* ================= ROUTES ================= */
+
+    // ✅ LOGIN
+    app.post("/login", async (req, res) => {
+      const { username, password } = req.body;
+
+      const [rows] = await db.query(
+        "SELECT * FROM users WHERE username = ?",
+        [username]
+      );
+
+      if (rows.length === 0) {
+        return res.status(401).json({ message: "User not found" });
+      }
+
+      const user = rows[0];
+
+      // TEMP plain password
+      if (password !== user.password) {
+        return res.status(401).json({ message: "Wrong password" });
+      }
+
+      const token = jwt.sign(
+        { id: user.id, role: user.role },
+        SECRET,
+        { expiresIn: "1d" }
+      );
+
+      res.json({ token, role: user.role });
     });
 
-    app.get('/student', async (req, res) => {
-      const [data] = await db.query("SELECT * FROM student");
+    // ✅ STUDENT ADD (only student)
+   app.post("/addstudent", async (req, res) => {
+  const { name, email, phone } = req.body;
+
+  await db.query(
+    `INSERT INTO students (name, email, phone) VALUES (?, ?, ?)`,
+    [name, email, phone]
+  );
+
+  res.json({ message: "Student added successfully" });
+});
+
+    // ✅ TEACHER VIEW
+    app.get("/student", verifyToken, async (req, res) => {
+      if (req.user.role !== "teacher") {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
+      const [data] = await db.query("SELECT * FROM students");
       res.json(data);
     });
 
-    app.get('/teacher', async (req, res) => {
-      const [data] = await db.query("SELECT * FROM teacher");
-      res.json(data);
-    });
-
-    app.post('/addstudent', async (req, res) => {
-      const { name, rollNo, class: className } = req.body;
-
-      await db.query(
-        `INSERT INTO student (name, roll_number, class) VALUES (?, ?, ?)`,
-        [name, rollNo, className]
-      );
-
-      res.json({ message: "Student added successfully" });
-    });
-
-    app.post('/addteacher', async (req, res) => {
-      const { name, subject, class: className } = req.body;
-
-      await db.query(
-        `INSERT INTO teacher (name, subject, class) VALUES (?, ?, ?)`,
-        [name, subject, className]
-      );
-
-      res.json({ message: "Teacher added successfully" });
-    });
-
-    app.delete('/student/:id', async (req, res) => {
-      const { id } = req.params;
-
-      const [result] = await db.query(
-        "DELETE FROM student WHERE id = ?",
-        [id]
-      );
-
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ message: "Student not found" });
+    // ✅ TEACHER DELETE
+    app.delete("/student/:id", verifyToken, async (req, res) => {
+      if (req.user.role !== "teacher") {
+        return res.status(403).json({ message: "Access denied" });
       }
 
-      res.json({ message: "Student deleted successfully" });
+      await db.query("DELETE FROM students WHERE id = ?", [req.params.id]);
+
+      res.json({ message: "Deleted successfully" });
     });
 
-    app.delete('/teacher/:id', async (req, res) => {
-      const { id } = req.params;
-
-      const [result] = await db.query(
-        "DELETE FROM teacher WHERE id = ?",
-        [id]
-      );
-
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ message: "Teacher not found" });
-      }
-
-      res.json({ message: "Teacher deleted successfully" });
+    // HEALTH
+    app.get("/", (req, res) => {
+      res.json({ message: "Backend running 🚀" });
     });
 
     app.listen(3500, () => {
@@ -200,7 +176,7 @@ const ensureTables = async (db) => {
     });
 
   } catch (error) {
-    console.error("❌ Fatal: Could not start server.", error);
+    console.error("❌ Fatal error:", error);
     process.exit(1);
   }
 })();
