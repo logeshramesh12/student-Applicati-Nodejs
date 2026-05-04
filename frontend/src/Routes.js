@@ -7,6 +7,7 @@ import Teacher from "./Teacher";
 function AppRoutes() {
   return (
     <Routes>
+    
       <Route path="/" element={<Home />} />
       <Route path="/login" element={<Login />} />
       <Route path="/student-form" element={<Student />} />

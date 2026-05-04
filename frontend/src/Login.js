@@ -1,52 +1,57 @@
-import { useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
-import { Input, Button, VStack, Heading } from "@chakra-ui/react";
+import React, { useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 function Login() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
-  const [searchParams] = useSearchParams();
-  const role = searchParams.get("role"); // student / teacher
+  const API = process.env.REACT_APP_API_BASE_URL;
+  const navigate = useNavigate(); // ✅ IMPORTANT
 
-  const navigate = useNavigate();
+  const handleLogin = async () => {
+    const res = await fetch(`${API}/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ username, password })
+    });
 
-  const handleLogin = () => {
-    // 🔥 TEMP login (frontend only)
-    if (!username || !password) {
-      alert("Enter username & password");
-      return;
-    }
+    const data = await res.json();
+    console.log("LOGIN RESPONSE:", data); // debug
 
-    localStorage.setItem("token", "dummy-token");
-    localStorage.setItem("role", role);
+    if (res.ok) {
+      // ✅ store token + role
+      localStorage.setItem("token", data.token);
+      localStorage.setItem("role", data.role);
 
-    if (role === "student") {
-      navigate("/student-form");
+      // ✅ ROLE-BASED REDIRECT
+     if (data.role === "teacher") {
+  navigate("/teacher-dashboard");
+} else {
+  navigate("/student-form");
+}
+
     } else {
-      navigate("/teacher-dashboard");
+      alert(data.message);
     }
   };
 
   return (
-    <VStack spacing={4} mt={10}>
-      <Heading>Login ({role})</Heading>
-
-      <Input
-        placeholder="Username"
+    <div>
+      <input
         onChange={(e) => setUsername(e.target.value)}
+        placeholder="username"
       />
 
-      <Input
+      <input
         type="password"
-        placeholder="Password"
         onChange={(e) => setPassword(e.target.value)}
+        placeholder="password"
       />
 
-      <Button colorScheme="teal" onClick={handleLogin}>
-        Login
-      </Button>
-    </VStack>
+      <button onClick={handleLogin}>Login</button>
+    </div>
   );
 }
 
