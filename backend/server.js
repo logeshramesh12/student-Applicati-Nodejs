@@ -1,7 +1,10 @@
-const express = require('express');
-const mysql = require('mysql2/promise');
-const cors = require('cors');
+// server.js
+
+const express = require("express");
+const mysql = require("mysql2/promise");
+const cors = require("cors");
 const jwt = require("jsonwebtoken");
+const bcrypt = require("bcrypt");
 
 const {
   SecretsManagerClient,
@@ -11,6 +14,12 @@ const {
 const app = express();
 app.use(express.json());
 app.use(cors());
+
+// Request logger (VERY useful in ECS)
+app.use((req, res, next) => {
+  console.log(`➡️ ${req.method} ${req.url}`);
+  next();
+});
 
 const SECRET = "mysecretkey";
 let db;
@@ -24,45 +33,69 @@ const secretsClient = new SecretsManagerClient({
 
 /* ------------------ FETCH DB CONFIG ------------------ */
 async function getDBConfig() {
-  const command = new GetSecretValueCommand({
-    SecretId: "myapp/db/config"
-  });
+  try {
+    console.log("🔐 Fetching DB config from Secrets Manager...");
 
-  const response = await secretsClient.send(command);
+    const command = new GetSecretValueCommand({
+      SecretId: "myapp/db/config"
+    });
 
-  if (!response.SecretString) {
-    throw new Error("Secret is empty");
+    const response = await secretsClient.send(command);
+
+    if (!response.SecretString) {
+      throw new Error("Secret is empty");
+    }
+
+    console.log("✅ Secret fetched");
+
+    return JSON.parse(response.SecretString);
+
+  } catch (err) {
+    console.error("❌ Failed to fetch secret:", err);
+    throw err;
   }
-
-  return JSON.parse(response.SecretString);
 }
 
 /* ------------------ CONNECT DB ------------------ */
 const connectDB = async () => {
-  const cfg = await getDBConfig();
+  try {
+    const cfg = await getDBConfig();
 
-  const pool = await mysql.createPool({
-    host: cfg.host,
-    user: cfg.user,
-    password: cfg.password,
-    database: cfg.database,
-    connectionLimit: 10,
-    ssl: { rejectUnauthorized: false }
-  });
+    console.log("🔌 Connecting to MySQL...");
 
-  console.log("✅ Connected to MySQL");
-  return pool;
+    const pool = await mysql.createPool({
+      host: cfg.host,
+      user: cfg.user,
+      password: cfg.password,
+      database: cfg.database,
+      connectionLimit: 10,
+      ssl: { rejectUnauthorized: false }
+    });
+
+    // Test connection
+    await pool.query("SELECT 1");
+
+    console.log("✅ DB connected");
+
+    return pool;
+
+  } catch (err) {
+    console.error("❌ DB connection failed:", err);
+    throw err;
+  }
 };
 
 /* ------------------ CREATE TABLES ------------------ */
 const ensureTables = async (db) => {
+  console.log("🧱 Creating tables if not exist...");
+
   await db.query(`
-    CREATE TABLE IF NOT EXISTS students (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    name VARCHAR(255),
-    email VARCHAR(255),
-    phone VARCHAR(20),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      username VARCHAR(255) UNIQUE,
+      password VARCHAR(255),
+      role VARCHAR(50),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
@@ -70,8 +103,8 @@ const ensureTables = async (db) => {
     CREATE TABLE IF NOT EXISTS students (
       id INT AUTO_INCREMENT PRIMARY KEY,
       name VARCHAR(255),
-      roll_number VARCHAR(255),
-      class VARCHAR(255),
+      email VARCHAR(255),
+      phone VARCHAR(20),
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -79,13 +112,15 @@ const ensureTables = async (db) => {
   console.log("✅ Tables ready");
 };
 
-/* ------------------ TOKEN MIDDLEWARE ------------------ */
+/* ------------------ AUTH ------------------ */
 const verifyToken = (req, res, next) => {
-  const token = req.headers.authorization;
+  const header = req.headers.authorization;
 
-  if (!token) {
+  if (!header || !header.startsWith("Bearer ")) {
     return res.status(403).json({ message: "No token" });
   }
+
+  const token = header.split(" ")[1];
 
   try {
     const decoded = jwt.verify(token, SECRET);
@@ -96,87 +131,123 @@ const verifyToken = (req, res, next) => {
   }
 };
 
-/* ------------------ START APP ------------------ */
-(async () => {
+const requireTeacher = (req, res, next) => {
+  if (req.user.role !== "teacher") {
+    return res.status(403).json({ message: "Teacher only" });
+  }
+  next();
+};
+
+/* ------------------ ROUTES ------------------ */
+
+app.get("/health", async (req, res) => {
   try {
-    db = await connectDB();
-    await ensureTables(db);
+    await db.query("SELECT 1");
+    res.status(200).json({ status: "ok" });
+  } catch (err) {
+    console.error("❌ Health check failed:", err);
+    res.status(500).json({ status: "db_error" });
+  }
+});
 
-    /* ================= ROUTES ================= */
+app.post("/register", async (req, res) => {
+  const { username, password } = req.body;
+  const hashed = await bcrypt.hash(password, 10);
 
-    // ✅ LOGIN
-    app.post("/login", async (req, res) => {
-      const { username, password } = req.body;
+  try {
+    await db.query(
+      "INSERT INTO users (username, password, role) VALUES (?, ?, 'student')",
+      [username, hashed]
+    );
+    res.json({ message: "Student registered" });
+  } catch {
+    res.status(400).json({ message: "Username exists" });
+  }
+});
 
-      const [rows] = await db.query(
-        "SELECT * FROM users WHERE username = ?",
-        [username]
-      );
+app.post("/login", async (req, res) => {
+  const { username, password } = req.body;
 
-      if (rows.length === 0) {
-        return res.status(401).json({ message: "User not found" });
-      }
+  const [rows] = await db.query(
+    "SELECT * FROM users WHERE username = ?",
+    [username]
+  );
 
-      const user = rows[0];
+  if (rows.length === 0) {
+    return res.status(401).json({ message: "User not found" });
+  }
 
-      // TEMP plain password
-      if (password !== user.password) {
-        return res.status(401).json({ message: "Wrong password" });
-      }
+  const user = rows[0];
+  const match = await bcrypt.compare(password, user.password);
 
-      const token = jwt.sign(
-        { id: user.id, role: user.role },
-        SECRET,
-        { expiresIn: "1d" }
-      );
+  if (!match) {
+    return res.status(401).json({ message: "Wrong password" });
+  }
 
-      res.json({ token, role: user.role });
-    });
+  const token = jwt.sign(
+    { id: user.id, role: user.role },
+    SECRET,
+    { expiresIn: "1d" }
+  );
 
-    // ✅ STUDENT ADD (only student)
-   app.post("/addstudent", async (req, res) => {
+  res.json({ token, role: user.role });
+});
+
+app.post("/addstudent", verifyToken, async (req, res) => {
   const { name, email, phone } = req.body;
 
   await db.query(
-    `INSERT INTO students (name, email, phone) VALUES (?, ?, ?)`,
+    "INSERT INTO students (name, email, phone) VALUES (?, ?, ?)",
     [name, email, phone]
   );
 
-  res.json({ message: "Student added successfully" });
+  res.json({ message: "Student added" });
 });
 
-    // ✅ TEACHER VIEW
-    app.get("/student", verifyToken, async (req, res) => {
-      if (req.user.role !== "teacher") {
-        return res.status(403).json({ message: "Access denied" });
-      }
+app.get("/student", verifyToken, requireTeacher, async (req, res) => {
+  const [data] = await db.query("SELECT * FROM students");
+  res.json(data);
+});
 
-      const [data] = await db.query("SELECT * FROM students");
-      res.json(data);
-    });
+app.delete("/student/:id", verifyToken, requireTeacher, async (req, res) => {
+  await db.query("DELETE FROM students WHERE id = ?", [req.params.id]);
+  res.json({ message: "Deleted" });
+});
 
-    // ✅ TEACHER DELETE
-    app.delete("/student/:id", verifyToken, async (req, res) => {
-      if (req.user.role !== "teacher") {
-        return res.status(403).json({ message: "Access denied" });
-      }
+app.put("/student/:id", verifyToken, requireTeacher, async (req, res) => {
+  const { name, email, phone } = req.body;
 
-      await db.query("DELETE FROM students WHERE id = ?", [req.params.id]);
+  await db.query(
+    "UPDATE students SET name=?, email=?, phone=? WHERE id=?",
+    [name, email, phone, req.params.id]
+  );
 
-      res.json({ message: "Deleted successfully" });
-    });
+  res.json({ message: "Updated" });
+});
 
-    // HEALTH
-    app.get("/", (req, res) => {
-      res.json({ message: "Backend running 🚀" });
-    });
+/* ------------------ START APP ------------------ */
 
-    app.listen(3500, () => {
+process.on("uncaughtException", (err) => {
+  console.error("💥 Uncaught Exception:", err);
+});
+
+process.on("unhandledRejection", (err) => {
+  console.error("💥 Unhandled Rejection:", err);
+});
+
+(async () => {
+  try {
+    console.log("🚀 Starting container...");
+
+    db = await connectDB();
+    await ensureTables(db);
+
+    app.listen(3500, "0.0.0.0", () => {
       console.log("🚀 Server running on port 3500");
     });
 
-  } catch (error) {
-    console.error("❌ Fatal error:", error);
+  } catch (err) {
+    console.error("❌ Startup failed:", err);
     process.exit(1);
   }
 })();

@@ -61,8 +61,8 @@ export default function Navbar() {
         <HStack spacing={4}>
           <Text fontWeight="bold">Student–Teacher Portal</Text>
           <NavLink to="/">Home</NavLink>
-          <NavLink to="/student">Student</NavLink>
-          <NavLink to="/teacher">Teacher</NavLink>
+          <NavLink to="/login/student">Student</NavLink>
+          <NavLink to="/login/teacher">Teacher</NavLink>
         </HStack>
         <IconButton
           aria-label="Toggle color mode"

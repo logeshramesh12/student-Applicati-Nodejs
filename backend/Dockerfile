@@ -1,45 +1,23 @@
-# ---------------------------
-# Base image
-# ---------------------------
-FROM node:18-alpine
+# Use modern Node (fix future AWS SDK warning)
+FROM node:22-alpine
 
-# ---------------------------
-# Set working directory
-# ---------------------------
+# Create app directory
 WORKDIR /app
 
-# ---------------------------
-# Copy package files first (for caching)
-# ---------------------------
+# Copy package files first (better caching)
 COPY package*.json ./
 
-# ---------------------------
-# Install production dependencies only
-# ---------------------------
-#RUN npm ci --only=production
+# Install dependencies
+RUN npm install --production
 
-# ---------------------------
-# Copy application source
-# ---------------------------
+# Copy source code
 COPY . .
 
-# ---------------------------
-# Create non-root user (security best practice)
-# ---------------------------
-RUN addgroup -S nodejs && adduser -S nodejs -G nodejs
-USER nodejs
-
-# ---------------------------
-# Expose backend port
-# ---------------------------
+# Expose port
 EXPOSE 3500
 
-# ---------------------------
 # Environment
-# ---------------------------
-#ENV NODE_ENV=production
+ENV NODE_ENV=production
 
-# ---------------------------
-# Start application
-# ---------------------------
+# Start app
 CMD ["node", "server.js"]

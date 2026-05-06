@@ -1,17 +1,17 @@
-// theme.js
 import { extendTheme } from "@chakra-ui/react";
+
 const config = {
-  initialColorMode: "system",
-  useSystemColorMode: true,
+  initialColorMode: "dark",
+  useSystemColorMode: false,
 };
+
 const styles = {
   global: {
-    "html, body, #root": { height: "100%" },
-    body: { bg: "gray.50", _dark: { bg: "gray.900" } },
+    body: {
+      bg: "#0f172a",
+      color: "#e2e8f0",
+    },
   },
 };
-const fonts = {
-  heading: `'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif`,
-  body: `'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif`,
-};
-export const theme = extendTheme({ config, styles, fonts });
+
+export const theme = extendTheme({ config, styles });
