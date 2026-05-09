@@ -1,5 +1,5 @@
 // server.js
-
+require("dns").setDefaultResultOrder("ipv4first");
 const express = require("express");
 const mysql = require("mysql2/promise");
 const cors = require("cors");
@@ -63,28 +63,25 @@ const connectDB = async () => {
 
     console.log("🔌 Connecting to MySQL...");
 
-    const pool = await mysql.createPool({
+    // First create ONE direct connection
+    const connection = await mysql.createConnection({
       host: cfg.host,
+      port: 3306,
       user: cfg.user,
       password: cfg.password,
       database: cfg.database,
-      connectionLimit: 10,
-      ssl: { rejectUnauthorized: false }
+      connectTimeout: 60000
     });
-
-    // Test connection
-    await pool.query("SELECT 1");
 
     console.log("✅ DB connected");
 
-    return pool;
+    return connection;
 
   } catch (err) {
     console.error("❌ DB connection failed:", err);
     throw err;
   }
 };
-
 /* ------------------ CREATE TABLES ------------------ */
 const ensureTables = async (db) => {
   console.log("🧱 Creating tables if not exist...");
